@@ -1,68 +1,27 @@
 import random
 import streamlit as st
 
-def get_range_for_difficulty(difficulty: str):
-    if difficulty == "Easy":
-        return 1, 20
-    if difficulty == "Normal":
-        return 1, 100
-    if difficulty == "Hard":
-        return 1, 50
-    return 1, 100
+from logic_utils import (
+    check_guess,
+    get_hint_message,
+    get_range_for_difficulty,
+    parse_guess,
+    update_score,
+)
 
+def get_temperature_hint(guess: int, secret: int) -> str:
+    """Return a proximity hint based on distance to the secret."""
+    distance = abs(guess - secret)
+    if distance == 0:
+        return "🎯 Exact match"
+    if distance <= 2:
+        return "🔥 Very hot"
+    if distance <= 5:
+        return "🌡️ Warm"
+    if distance <= 10:
+        return "🧊 Cold"
+    return "❄️ Freezing"
 
-def parse_guess(raw: str):
-    if raw is None:
-        return False, None, "Enter a guess."
-
-    if raw == "":
-        return False, None, "Enter a guess."
-
-    try:
-        if "." in raw:
-            value = int(float(raw))
-        else:
-            value = int(raw)
-    except Exception:
-        return False, None, "That is not a number."
-
-    return True, value, None
-
-
-def check_guess(guess, secret):
-    if guess == secret:
-        return "Win", "🎉 Correct!"
-
-    try:
-        if guess > secret:
-            return "Too High", "📈 Go HIGHER!"
-        else:
-            return "Too Low", "📉 Go LOWER!"
-    except TypeError:
-        g = str(guess)
-        if g == secret:
-            return "Win", "🎉 Correct!"
-        if g > secret:
-            return "Too High", "📈 Go HIGHER!"
-        return "Too Low", "📉 Go LOWER!"
-
-
-def update_score(current_score: int, outcome: str, attempt_number: int):
-    if outcome == "Win":
-        points = 100 - 10 * (attempt_number + 1)
-        if points < 10:
-            points = 10
-        return current_score + points
-
-    if outcome == "Too High":
-        if attempt_number % 2 == 0:
-            return current_score + 5
-        return current_score - 5
-
-    if outcome == "Too Low":
-        return current_score - 5
-
-    return current_score
 
 st.set_page_config(page_title="Glitchy Guesser", page_icon="🎮")
 
@@ -88,28 +47,37 @@ low, high = get_range_for_difficulty(difficulty)
 
 st.sidebar.caption(f"Range: {low} to {high}")
 st.sidebar.caption(f"Attempts allowed: {attempt_limit}")
+show_enhanced_ui = st.sidebar.checkbox("Enhanced UI mode", value=True)
+show_temp_hints = st.sidebar.checkbox("Temperature hints", value=True)
 
-if "secret" not in st.session_state:
+if st.session_state.get("game_difficulty") != difficulty:
+    # Streamlit reruns the whole script on every interaction; this ensures
+    # the game state stays consistent when the user changes difficulty.
+    st.session_state.game_difficulty = difficulty
     st.session_state.secret = random.randint(low, high)
-
-if "attempts" not in st.session_state:
-    st.session_state.attempts = 1
-
-if "score" not in st.session_state:
+    st.session_state.attempts = 0
     st.session_state.score = 0
-
-if "status" not in st.session_state:
     st.session_state.status = "playing"
-
-if "history" not in st.session_state:
     st.session_state.history = []
+    st.session_state.history_rows = []
 
 st.subheader("Make a guess")
 
 st.info(
-    f"Guess a number between 1 and 100. "
+    f"Guess a number between {low} and {high}. "
     f"Attempts left: {attempt_limit - st.session_state.attempts}"
 )
+
+if show_enhanced_ui:
+    attempts_used = st.session_state.attempts
+    attempts_remaining = max(0, attempt_limit - attempts_used)
+    progress = min(1.0, attempts_used / attempt_limit)
+
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    metric_col1.metric("Score", st.session_state.score)
+    metric_col2.metric("Attempts Used", attempts_used)
+    metric_col3.metric("Attempts Left", attempts_remaining)
+    st.progress(progress, text=f"Attempts progress: {attempts_used}/{attempt_limit}")
 
 with st.expander("Developer Debug Info"):
     st.write("Secret:", st.session_state.secret)
@@ -117,6 +85,7 @@ with st.expander("Developer Debug Info"):
     st.write("Score:", st.session_state.score)
     st.write("Difficulty:", difficulty)
     st.write("History:", st.session_state.history)
+    st.write("History Rows:", st.session_state.get("history_rows", []))
 
 raw_guess = st.text_input(
     "Enter your guess:",
@@ -133,7 +102,11 @@ with col3:
 
 if new_game:
     st.session_state.attempts = 0
-    st.session_state.secret = random.randint(1, 100)
+    st.session_state.secret = random.randint(low, high)
+    st.session_state.score = 0
+    st.session_state.status = "playing"
+    st.session_state.history = []
+    st.session_state.history_rows = []
     st.success("New game started.")
     st.rerun()
 
@@ -151,19 +124,40 @@ if submit:
 
     if not ok:
         st.session_state.history.append(raw_guess)
+        st.session_state.history_rows.append(
+            {
+                "Attempt": st.session_state.attempts,
+                "Guess": raw_guess,
+                "Outcome": "Invalid",
+                "Hint": err,
+                "Temperature": "-",
+            }
+        )
         st.error(err)
     else:
         st.session_state.history.append(guess_int)
-
-        if st.session_state.attempts % 2 == 0:
-            secret = str(st.session_state.secret)
-        else:
-            secret = st.session_state.secret
-
-        outcome, message = check_guess(guess_int, secret)
+        outcome = check_guess(guess_int, st.session_state.secret)
+        hint_text = get_hint_message(outcome)
+        temp_text = (
+            get_temperature_hint(guess_int, st.session_state.secret)
+            if show_temp_hints
+            else "-"
+        )
 
         if show_hint:
-            st.warning(message)
+            st.warning(hint_text)
+            if show_temp_hints and outcome != "Win":
+                st.caption(f"Proximity hint: {temp_text}")
+
+        st.session_state.history_rows.append(
+            {
+                "Attempt": st.session_state.attempts,
+                "Guess": guess_int,
+                "Outcome": outcome,
+                "Hint": hint_text,
+                "Temperature": temp_text,
+            }
+        )
 
         st.session_state.score = update_score(
             current_score=st.session_state.score,
@@ -186,6 +180,10 @@ if submit:
                     f"The secret was {st.session_state.secret}. "
                     f"Score: {st.session_state.score}"
                 )
+
+if show_enhanced_ui and st.session_state.get("history_rows"):
+    st.subheader("Guess History")
+    st.dataframe(st.session_state.history_rows, use_container_width=True, hide_index=True)
 
 st.divider()
 st.caption("Built by an AI that claims this code is production-ready.")
